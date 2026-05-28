@@ -1,0 +1,276 @@
+{% extends "base.html" %}
+{% block title %}Dashboard · SDLS{% endblock %}
+{% block breadcrumb %}Cluster Overview{% endblock %}
+{% block content %}
+<div class="page-body">
+
+  <!-- Header -->
+  <div class="page-header">
+    <div>
+      <div class="page-title">Cluster Overview</div>
+      <div class="page-sub">Real-time health across all EC2 nodes and microservices</div>
+    </div>
+    <div class="header-actions">
+      <button class="btn btn-primary" onclick="simulateOrders(5)">▶ Simulate 5 Orders</button>
+      <button class="btn btn-secondary" onclick="simulateOrders(20)">▶ Bulk (20)</button>
+    </div>
+  </div>
+
+  <!-- Clock bar -->
+  <div class="clock-bar">
+    <div class="clock-item">
+      <span class="clock-label">Synchronized UTC</span>
+      <span class="clock-val" id="syncedUtc">--</span>
+    </div>
+    <div class="clock-item">
+      <span class="clock-label">Local Time</span>
+      <span class="clock-val" id="localTime">--</span>
+    </div>
+    <div class="clock-item">
+      <span class="clock-label">Redis Queue</span>
+      <span class="clock-val" id="queueLen">--</span>
+    </div>
+    <div class="clock-item">
+      <span class="clock-label">Active Services</span>
+      <span class="clock-val" id="activeNodes">--</span>
+    </div>
+  </div>
+
+  <!-- Stats -->
+  <div class="stats-grid">
+    <div class="stat-card">
+      <div class="stat-icon">📊</div>
+      <div class="stat-val" id="totalReqs">--</div>
+      <div class="stat-label">Total Requests</div>
+    </div>
+    <div class="stat-card success">
+      <div class="stat-icon">✅</div>
+      <div class="stat-val" id="successCount">--</div>
+      <div class="stat-label">Successful</div>
+    </div>
+    <div class="stat-card error">
+      <div class="stat-icon">❌</div>
+      <div class="stat-val" id="errorCount">--</div>
+      <div class="stat-label">Errors</div>
+    </div>
+    <div class="stat-card warn">
+      <div class="stat-icon">📉</div>
+      <div class="stat-val" id="errorRate">--%</div>
+      <div class="stat-label">Error Rate</div>
+    </div>
+  </div>
+
+  <!-- EC2 Nodes -->
+  <div>
+    <div class="card-title" style="margin-bottom:10px">⬡ EC2 Nodes (Dynamic Registry)</div>
+    <div class="nodes-grid" id="nodesGrid">
+      <div class="empty-state loading-pulse">Loading registry…</div>
+    </div>
+  </div>
+
+  <!-- Failovers + Priority side by side -->
+  <div class="two-col">
+    <div class="card">
+      <div class="card-header">
+        <span class="card-title">⚡ Failover Events</span>
+        <span class="card-subtitle" id="failoverCount">—</span>
+      </div>
+      <div class="card-body">
+        <div id="failoverList" class="failover-list">
+          <div class="empty-state"><span>No failovers yet</span></div>
+        </div>
+      </div>
+    </div>
+    <div class="card">
+      <div class="card-header">
+        <span class="card-title">🎛️ Service Priority</span>
+        <span class="card-subtitle" id="loadBadge"></span>
+      </div>
+      <div class="card-body">
+        <div id="priorityList">
+          <div class="empty-state loading-pulse">Loading…</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Live log stream -->
+  <div class="card">
+    <div class="card-header">
+      <span class="card-title">📋 Live Log Stream</span>
+      <div style="display:flex;gap:6px">
+        <button class="btn btn-sm btn-secondary" onclick="toggleLiveFeed()">⏸ Pause</button>
+        <button class="btn btn-sm btn-secondary" onclick="clearFeed()">✕ Clear</button>
+      </div>
+    </div>
+    <div id="liveLogList" class="log-list" style="max-height:300px;">
+      <div class="empty-state">Waiting for live events…</div>
+    </div>
+  </div>
+
+</div>
+{% endblock %}
+{% block scripts %}
+<script>
+const MAX_LOG_ROWS = 80;
+let paused = false;
+
+/* ── Coordinator polling ───────────────────────────────────────────── */
+async function pollCoordinator() {
+  const url = window.SDLS.getUrl("coordinator");
+  if (!url) return;
+  try {
+    const [stateR, topR] = await Promise.all([
+      fetch(`${url}/api/cluster/state`),
+      fetch(`${url}/api/cluster/topology`),
+    ]);
+    if (stateR.ok) renderClusterState(await stateR.json());
+    if (topR.ok) renderTopologyNodes(await topR.json());
+  } catch (e) {}
+}
+
+function renderClusterState(d) {
+  if (!d.success) return;
+  const data = d.data;
+
+  // Failovers
+  const events = data.failovers || [];
+  const fl = document.getElementById("failoverList");
+  if (fl) {
+    if (!events.length) {
+      fl.innerHTML = '<div class="empty-state"><span>No failovers</span></div>';
+    } else {
+      fl.innerHTML = events.slice(-6).reverse().map(e => `
+        <div class="failover-item ${e.event}">
+          <span class="failover-ts">${window.SDLS.fmtTs(e.timestamp)}</span>
+          <div>
+            <div class="failover-svc">${e.service}</div>
+            <div class="failover-detail">${e.event === "failover" ? "→ " + e.switched_to : "restored to primary"}</div>
+          </div>
+        </div>`).join("");
+      document.getElementById("failoverCount").textContent = events.length + " total";
+    }
+  }
+
+  // Priority
+  const pl = document.getElementById("priorityList");
+  if (pl) {
+    const paused = data.paused_services || [];
+    const high = data.high_load;
+    const lb = document.getElementById("loadBadge");
+    if (lb) lb.innerHTML = high ? '<span class="badge badge-error">HIGH LOAD</span>' : '<span class="badge badge-success">NORMAL</span>';
+    const prios = data.priorities || {};
+    pl.innerHTML = Object.entries(prios).sort((a,b)=>a[1]-b[1]).map(([svc, p]) => {
+      const isP = paused.includes(svc);
+      return `<div style="display:flex;align-items:center;gap:8px;padding:5px 0;border-bottom:1px solid var(--border-subtle);font-size:12px">
+        <span style="font-family:var(--mono);color:var(--text-dim);width:20px">P${p}</span>
+        <span style="flex:1">${svc}</span>
+        ${isP ? '<span class="badge badge-warning">THROTTLED</span>' : '<span class="badge badge-success">ACTIVE</span>'}
+      </div>`;
+    }).join("");
+  }
+}
+
+function renderTopologyNodes(d) {
+  if (!d.success) return;
+  const nodes = d.data.nodes || [];
+  const grid = document.getElementById("nodesGrid");
+  if (!grid || !nodes.length) return;
+
+  // Group by role
+  const byRole = {};
+  nodes.forEach(n => {
+    const r = n.role || "unknown";
+    if (!byRole[r]) byRole[r] = [];
+    byRole[r].push(n);
+  });
+
+  const roleClass = {system1:"sys1",system2:"sys2",system3:"sys3",infra:"infra"};
+  const roleLabel = {system1:"SYSTEM 1",system2:"SYSTEM 2",system3:"SYSTEM 3",infra:"INFRA"};
+
+  grid.innerHTML = Object.entries(byRole).map(([role, svcs]) => {
+    const cls = roleClass[role] || "infra";
+    const lbl = roleLabel[role] || role.toUpperCase();
+    const host = svcs[0]?.host || "—";
+    const status = svcs.every(s=>s.status==="healthy") ? "healthy" : svcs.some(s=>s.status==="healthy") ? "degraded" : "down";
+    const svcRows = svcs.map(s => `
+      <div class="svc-row">
+        <span class="svc-dot ${s.status}"></span>
+        <span>${s.id}</span>
+        <span style="margin-left:auto;font-size:9px;color:var(--text-dim)">:${s.port||""}</span>
+        ${s.response_time ? `<span class="svc-rt">${Math.round(s.response_time)}ms</span>` : ""}
+      </div>`).join("");
+    return `
+      <div class="node-card ${cls}">
+        <div class="node-card-header">
+          <span class="node-label ${cls}">${lbl}</span>
+          <span class="node-host" title="${host}">${host}</span>
+          <span class="node-status-badge ${status}"></span>
+        </div>
+        <div class="node-card-body">${svcRows}</div>
+      </div>`;
+  }).join("");
+
+  // Update stats
+  const all = nodes.length;
+  const healthy = nodes.filter(n=>n.status==="healthy").length;
+  document.getElementById("activeNodes").textContent = `${healthy}/${all}`;
+}
+
+/* ── Analytics stats ────────────────────────────────────────────────── */
+async function pollAnalytics() {
+  const url = window.SDLS.getUrl("logging-service");
+  if (!url) return;
+  try {
+    const r = await fetch(`${url}/api/analytics/overview`);
+    if (!r.ok) return;
+    const d = await r.json();
+    const data = d.data || {};
+    const total = (data.total || 0);
+    const succ  = (data.by_status?.SUCCESS || 0) + (data.by_status?.success || 0);
+    const err   = (data.by_status?.ERROR   || 0) + (data.by_status?.error   || 0);
+    document.getElementById("totalReqs").textContent  = total.toLocaleString();
+    document.getElementById("successCount").textContent = succ.toLocaleString();
+    document.getElementById("errorCount").textContent  = err.toLocaleString();
+    const rate = total > 0 ? ((err / total) * 100).toFixed(1) : "0.0";
+    document.getElementById("errorRate").textContent  = rate + "%";
+  } catch (e) {}
+}
+
+/* ── Live log feed ───────────────────────────────────────────────────── */
+window.SDLS.onNewLog = function (entry) {
+  if (paused) return;
+  const list = document.getElementById("liveLogList");
+  if (!list) return;
+  if (list.querySelector(".empty-state")) list.innerHTML = "";
+  const row = document.createElement("div");
+  row.className = "log-entry";
+  row.innerHTML = `
+    <span class="log-ts">${window.SDLS.fmtTs(entry.timestamp)}</span>
+    <span class="log-status ${entry.status}">${entry.status}</span>
+    <span class="log-svc">${entry.service_name || "—"}</span>
+    <span class="log-msg">${entry.message || ""}</span>`;
+  list.insertBefore(row, list.firstChild);
+  while (list.children.length > MAX_LOG_ROWS) list.removeChild(list.lastChild);
+};
+
+function toggleLiveFeed() {
+  paused = !paused;
+  const btn = event.target;
+  btn.textContent = paused ? "▶ Resume" : "⏸ Pause";
+}
+
+function clearFeed() {
+  const list = document.getElementById("liveLogList");
+  if (list) list.innerHTML = '<div class="empty-state">Feed cleared</div>';
+}
+
+/* ── Kick off polling ───────────────────────────────────────────────── */
+setTimeout(() => {
+  pollCoordinator();
+  pollAnalytics();
+  setInterval(pollCoordinator, 10000);
+  setInterval(pollAnalytics, 15000);
+}, 2500);
+</script>
+{% endblock %}

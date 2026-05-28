@@ -1,0 +1,228 @@
+# ═══════════════════════════════════════════════════════════════════════════════
+# SDLS v3 — Single-host Docker Compose (dev / single EC2 instance)
+# All IPs resolved via Docker DNS names and Redis node registry.
+# For multi-host EC2 deployment, use the per-system compose files:
+#   system1-compose.yml  (EC2 instance running System 1 services)
+#   system2-compose.yml  (EC2 instance running System 2 services)
+#   system3-compose.yml  (EC2 instance running System 3 + infra)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+version: "3.9"
+
+x-common-env: &common-env
+  REDIS_HOST: redis
+  REDIS_PORT: "6379"
+  MONGO_URI: mongodb://mongodb:27017
+
+x-service-defaults: &service-defaults
+  restart: unless-stopped
+  networks: [sdls-net]
+  logging:
+    driver: "json-file"
+    options: { max-size: "10m", max-file: "3" }
+
+services:
+
+  # ── Infrastructure ─────────────────────────────────────────────────────────
+  mongodb:
+    image: mongo:7.0
+    container_name: sdls-mongodb
+    ports: ["27017:27017"]
+    volumes:
+      - mongo-data:/data/db
+      - ./backend/database/mongo-init.js:/docker-entrypoint-initdb.d/mongo-init.js:ro
+    networks: [sdls-net]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7.2-alpine
+    container_name: sdls-redis
+    ports: ["6379:6379"]
+    command: redis-server --save 60 1 --maxmemory 512mb --maxmemory-policy allkeys-lru
+    volumes: [redis-data:/data]
+    networks: [sdls-net]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      retries: 5
+
+  # ── Time Sync (System 3) ───────────────────────────────────────────────────
+  time-sync:
+    build:
+      context: .
+      dockerfile: backend/time-sync-service/Dockerfile
+    container_name: sdls-time-sync
+    ports: ["5008:5008"]
+    environment:
+      <<: *common-env
+      SERVICE_NAME: time-sync
+    depends_on:
+      redis: {condition: service_healthy}
+    <<: *service-defaults
+
+  # ── Logging Service (System 3) ─────────────────────────────────────────────
+  logging-service:
+    build:
+      context: .
+      dockerfile: backend/logging-service/Dockerfile
+    container_name: sdls-logging
+    ports: ["5005:5005"]
+    environment:
+      <<: *common-env
+      SERVICE_NAME: logging-service
+    depends_on:
+      mongodb: {condition: service_healthy}
+      redis:   {condition: service_healthy}
+    <<: *service-defaults
+
+  # ── Redis Log Worker (System 3) ────────────────────────────────────────────
+  redis-worker:
+    build:
+      context: .
+      dockerfile: backend/logging-service/Dockerfile
+    container_name: sdls-redis-worker
+    command: python redis_worker.py
+    environment:
+      <<: *common-env
+    depends_on:
+      mongodb: {condition: service_healthy}
+      redis:   {condition: service_healthy}
+    <<: *service-defaults
+
+  # ── Backup Logging (System 3) ──────────────────────────────────────────────
+  backup-logging:
+    build:
+      context: .
+      dockerfile: backend/backup-logging-service/Dockerfile
+    container_name: sdls-backup-logging
+    ports: ["5010:5010"]
+    environment:
+      <<: *common-env
+      SERVICE_NAME: backup-logging
+    depends_on:
+      redis: {condition: service_healthy}
+    <<: *service-defaults
+
+  # ── Coordinator (System 3) ─────────────────────────────────────────────────
+  coordinator:
+    build:
+      context: .
+      dockerfile: backend/coordinator-service/Dockerfile
+    container_name: sdls-coordinator
+    ports: ["5007:5007"]
+    environment:
+      <<: *common-env
+      SERVICE_NAME: coordinator
+    depends_on: [redis, logging-service]
+    <<: *service-defaults
+
+  # ── Notification (System 3) ────────────────────────────────────────────────
+  notification-service:
+    build:
+      context: .
+      dockerfile: backend/notification-service/Dockerfile
+    container_name: sdls-notification
+    ports: ["5004:5004"]
+    environment:
+      <<: *common-env
+      SERVICE_NAME: notification-service
+    depends_on: [logging-service, redis]
+    <<: *service-defaults
+
+  # ── Inventory (System 2) ───────────────────────────────────────────────────
+  inventory-service:
+    build:
+      context: .
+      dockerfile: backend/inventory-service/Dockerfile
+    container_name: sdls-inventory
+    ports: ["5003:5003"]
+    environment:
+      <<: *common-env
+      SERVICE_NAME: inventory-service
+    depends_on: [logging-service, redis]
+    <<: *service-defaults
+
+  # ── Payment (System 2) ─────────────────────────────────────────────────────
+  payment-service:
+    build:
+      context: .
+      dockerfile: backend/payment-service/Dockerfile
+    container_name: sdls-payment
+    ports: ["5002:5002"]
+    environment:
+      <<: *common-env
+      SERVICE_NAME: payment-service
+    depends_on: [logging-service, redis]
+    <<: *service-defaults
+
+  # ── Backup Payment (System 2) ──────────────────────────────────────────────
+  backup-payment:
+    build:
+      context: .
+      dockerfile: backend/backup-payment-service/Dockerfile
+    container_name: sdls-backup-payment
+    ports: ["5009:5009"]
+    environment:
+      <<: *common-env
+      SERVICE_NAME: backup-payment
+    depends_on: [logging-service, redis]
+    <<: *service-defaults
+
+  # ── Order Service (System 1) ───────────────────────────────────────────────
+  order-service:
+    build:
+      context: .
+      dockerfile: backend/order-service/Dockerfile
+    container_name: sdls-order
+    ports: ["5001:5001"]
+    environment:
+      <<: *common-env
+      SERVICE_NAME: order-service
+    depends_on: [payment-service, inventory-service, notification-service, logging-service]
+    <<: *service-defaults
+
+  # ── API Gateway (System 1) ─────────────────────────────────────────────────
+  api-gateway:
+    build:
+      context: .
+      dockerfile: backend/api-gateway/Dockerfile
+    container_name: sdls-gateway
+    ports: ["5000:5000"]
+    environment:
+      <<: *common-env
+      SERVICE_NAME: api-gateway
+    depends_on: [order-service, coordinator]
+    <<: *service-defaults
+
+  # ── Dashboard (System 3) ───────────────────────────────────────────────────
+  dashboard:
+    build:
+      context: .
+      dockerfile: frontend/dashboard/Dockerfile
+    container_name: sdls-dashboard
+    ports: ["5006:5006"]
+    environment:
+      <<: *common-env
+      SERVICE_NAME: dashboard
+      DASHBOARD_USERNAME: ${DASHBOARD_USERNAME:-admin}
+      DASHBOARD_PASSWORD: ${DASHBOARD_PASSWORD:-admin123}
+      SECRET_KEY: ${SECRET_KEY:-sdls-v3-change-in-production}
+    depends_on: [logging-service, coordinator]
+    <<: *service-defaults
+
+volumes:
+  mongo-data:
+  redis-data:
+
+networks:
+  sdls-net:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.28.0.0/16

@@ -1,0 +1,213 @@
+{% extends "base.html" %}
+{% block title %}Analytics · SDLS{% endblock %}
+{% block breadcrumb %}Analytics{% endblock %}
+{% block content %}
+<div class="page-body">
+  <div class="page-header">
+    <div>
+      <div class="page-title">Analytics</div>
+      <div class="page-sub">Aggregated metrics and throughput across all distributed services</div>
+    </div>
+    <div class="header-actions">
+      <button class="btn btn-secondary" onclick="loadAnalytics()">↺ Refresh</button>
+    </div>
+  </div>
+
+  <!-- Summary stats -->
+  <div class="stats-grid">
+    <div class="stat-card success">
+      <div class="stat-icon">📈</div>
+      <div class="stat-val" id="aTotalReqs">—</div>
+      <div class="stat-label">Total Requests</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-icon">⚡</div>
+      <div class="stat-val" id="aAvgRt">—</div>
+      <div class="stat-label">Avg Response (ms)</div>
+    </div>
+    <div class="stat-card error">
+      <div class="stat-icon">💥</div>
+      <div class="stat-val" id="aErrRate">—%</div>
+      <div class="stat-label">Error Rate</div>
+    </div>
+    <div class="stat-card warn">
+      <div class="stat-icon">🌡</div>
+      <div class="stat-val" id="aQueueDepth">—</div>
+      <div class="stat-label">Queue Depth</div>
+    </div>
+  </div>
+
+  <!-- Charts row -->
+  <div class="two-col">
+    <div class="card">
+      <div class="card-header"><span class="card-title">Status Distribution</span></div>
+      <div class="card-body">
+        <div id="statusChart" style="display:flex;flex-direction:column;gap:8px"></div>
+      </div>
+    </div>
+    <div class="card">
+      <div class="card-header"><span class="card-title">Requests by Service</span></div>
+      <div class="card-body">
+        <div id="serviceChart" style="display:flex;flex-direction:column;gap:8px"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Per-service table -->
+  <div class="card">
+    <div class="card-header"><span class="card-title">Per-Service Breakdown</span></div>
+    <div style="overflow-x:auto">
+      <table class="data-table">
+        <thead>
+          <tr>
+            <th>Service</th>
+            <th>Total Logs</th>
+            <th>SUCCESS</th>
+            <th>ERROR</th>
+            <th>WARNING</th>
+            <th>Error Rate</th>
+            <th>Avg RT (ms)</th>
+          </tr>
+        </thead>
+        <tbody id="svcBreakdownBody">
+          <tr><td colspan="7" style="text-align:center;color:var(--text-dim);padding:24px">Loading…</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- Recent activity bar chart -->
+  <div class="card">
+    <div class="card-header">
+      <span class="card-title">Request Volume (Last 10 Min — Live)</span>
+    </div>
+    <div class="card-body">
+      <div class="mini-bar-chart" id="volumeChart" style="height:120px;gap:2px;align-items:flex-end"></div>
+      <div style="display:flex;justify-content:space-between;margin-top:6px;font-size:10px;color:var(--text-dim)">
+        <span>10 min ago</span><span>Now</span>
+      </div>
+    </div>
+  </div>
+</div>
+{% endblock %}
+{% block scripts %}
+<script>
+// Rolling window: 60 buckets × 10-second slots = 10 minutes
+const BUCKETS = 60;
+const rollingVolume = new Array(BUCKETS).fill(0);
+let bucketIndex = 0;
+
+// Increment volume on each new live log
+window.SDLS.onNewLog = function(entry) {
+  rollingVolume[bucketIndex]++;
+  renderVolumeChart();
+};
+
+// Advance bucket every 10 seconds
+setInterval(() => {
+  bucketIndex = (bucketIndex + 1) % BUCKETS;
+  rollingVolume[bucketIndex] = 0;
+  renderVolumeChart();
+}, 10000);
+
+function renderVolumeChart() {
+  const wrap = document.getElementById("volumeChart");
+  if (!wrap) return;
+  const max = Math.max(...rollingVolume, 1);
+  // Reorder so current bucket is last
+  const ordered = [];
+  for (let i = 1; i <= BUCKETS; i++) ordered.push(rollingVolume[(bucketIndex + i) % BUCKETS]);
+  wrap.innerHTML = ordered.map((v, i) => {
+    const pct = Math.max(4, Math.round((v / max) * 100));
+    const isNew = i === BUCKETS - 1;
+    const color = isNew ? "var(--accent)" : (v > max * 0.8 ? "var(--danger)" : v > max * 0.5 ? "var(--warning)" : "var(--accent-dim)");
+    return `<div class="bar-segment" style="height:${pct}%;background:${color};flex:1" title="${v} reqs"></div>`;
+  }).join("");
+}
+
+function renderProgressBar(label, value, max, color) {
+  const pct = max > 0 ? Math.min(100, Math.round((value / max) * 100)) : 0;
+  return `
+    <div style="font-size:12px">
+      <div style="display:flex;justify-content:space-between;margin-bottom:3px">
+        <span>${label}</span>
+        <span style="font-family:var(--mono);font-weight:600">${value.toLocaleString()}</span>
+      </div>
+      <div style="height:6px;background:var(--bg-hover);border-radius:3px;overflow:hidden">
+        <div style="height:100%;width:${pct}%;background:${color};border-radius:3px;transition:width .4s ease"></div>
+      </div>
+    </div>`;
+}
+
+async function loadAnalytics() {
+  const url = window.SDLS.getUrl("logging-service");
+  if (!url) return;
+  try {
+    const r = await fetch(`${url}/api/analytics/overview`);
+    if (!r.ok) return;
+    const d = await r.json();
+    const data = d.data || {};
+
+    const total = data.total || 0;
+    const byStatus  = data.by_status  || {};
+    const byService = data.by_service || {};
+    const avgRt     = data.avg_response_time_ms;
+
+    document.getElementById("aTotalReqs").textContent = total.toLocaleString();
+    document.getElementById("aAvgRt").textContent = avgRt != null ? Math.round(avgRt) : "—";
+    const err = byStatus.ERROR || byStatus.error || 0;
+    document.getElementById("aErrRate").textContent =
+      total > 0 ? ((err / total) * 100).toFixed(1) + "%" : "0%";
+
+    // Status chart
+    const maxStatus = Math.max(...Object.values(byStatus), 1);
+    const statusColors = { SUCCESS:"var(--success)", ERROR:"var(--danger)", WARNING:"var(--warning)", INFO:"var(--info)" };
+    document.getElementById("statusChart").innerHTML = Object.entries(byStatus)
+      .sort((a,b) => b[1]-a[1])
+      .map(([s, v]) => renderProgressBar(s, v, maxStatus, statusColors[s] || "var(--accent)"))
+      .join("");
+
+    // Service chart
+    const maxSvc = Math.max(...Object.values(byService), 1);
+    document.getElementById("serviceChart").innerHTML = Object.entries(byService)
+      .sort((a,b) => b[1]-a[1]).slice(0,8)
+      .map(([s, v]) => renderProgressBar(s, v, maxSvc, "var(--accent)"))
+      .join("");
+
+    // Per-service breakdown table
+    const tbody = document.getElementById("svcBreakdownBody");
+    if (data.by_service_detail) {
+      tbody.innerHTML = Object.entries(data.by_service_detail)
+        .sort((a,b) => b[1].total - a[1].total)
+        .map(([svc, m]) => {
+          const t = m.total || 0;
+          const s = m.SUCCESS || m.success || 0;
+          const e = m.ERROR   || m.error   || 0;
+          const w = m.WARNING || m.warning || 0;
+          const rate = t > 0 ? ((e/t)*100).toFixed(1) : "0.0";
+          return `<tr>
+            <td style="color:var(--accent)">${svc}</td>
+            <td class="mono">${t.toLocaleString()}</td>
+            <td class="mono" style="color:var(--success)">${s.toLocaleString()}</td>
+            <td class="mono" style="color:var(--danger)">${e.toLocaleString()}</td>
+            <td class="mono" style="color:var(--warning)">${w.toLocaleString()}</td>
+            <td>${window.SDLS.badge(parseFloat(rate) > 10 ? "ERROR" : parseFloat(rate) > 3 ? "WARNING" : "SUCCESS")}&nbsp;${rate}%</td>
+            <td class="mono">${m.avg_rt != null ? Math.round(m.avg_rt) : "—"}</td>
+          </tr>`;
+        }).join("");
+    } else {
+      // Fallback: build from by_service
+      tbody.innerHTML = Object.entries(byService).sort((a,b)=>b[1]-a[1]).map(([svc, cnt]) =>
+        `<tr>
+          <td style="color:var(--accent)">${svc}</td>
+          <td class="mono">${cnt.toLocaleString()}</td>
+          <td colspan="5" style="color:var(--text-dim);font-size:11px">Detail unavailable</td>
+        </tr>`).join("");
+    }
+  } catch(e) { console.error("Analytics error", e); }
+}
+
+renderVolumeChart();
+setTimeout(() => { loadAnalytics(); setInterval(loadAnalytics, 20000); }, 2500);
+</script>
+{% endblock %}

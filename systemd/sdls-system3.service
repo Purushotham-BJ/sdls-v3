@@ -1,0 +1,22 @@
+[Unit]
+Description=SDLS v3 — System 3 (Infra: Redis, MongoDB, Dashboard, Coordinator, Logging)
+After=network-online.target docker.service
+Wants=network-online.target
+Requires=docker.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+WorkingDirectory=/opt/sdls
+EnvironmentFile=-/opt/sdls/.env
+ExecStartPre=/usr/bin/docker compose -f /opt/sdls/system3-compose.yml pull --quiet || true
+ExecStart=/opt/sdls/scripts/deploy.sh
+ExecStop=/usr/bin/docker compose -f /opt/sdls/system3-compose.yml down
+StandardOutput=journal
+StandardError=journal
+TimeoutStartSec=300
+Restart=on-failure
+RestartSec=15
+
+[Install]
+WantedBy=multi-user.target

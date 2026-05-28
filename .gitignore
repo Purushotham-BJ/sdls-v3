@@ -1,0 +1,33 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# Env / secrets
+.env
+.env.resolved
+*.env
+
+# Docker volumes
+mongo-data/
+redis-data/
+
+# Editor
+.vscode/
+.idea/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
+
+
+__pycache__/
+*.pyc
+.env
+node_modules/
+*.log
+*.zip
+.swapfile

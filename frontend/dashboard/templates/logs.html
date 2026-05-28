@@ -1,0 +1,142 @@
+{% extends "base.html" %}
+{% block title %}Logs · SDLS{% endblock %}
+{% block breadcrumb %}Logs Viewer{% endblock %}
+{% block content %}
+<div class="page-body">
+  <div class="page-header">
+    <div>
+      <div class="page-title">Distributed Log Viewer</div>
+      <div class="page-sub">Query logs from MongoDB · live feed via Socket.IO</div>
+    </div>
+  </div>
+
+  <!-- Filters -->
+  <div class="card">
+    <div class="card-header"><span class="card-title">Filters</span></div>
+    <div class="card-body">
+      <div class="filter-bar">
+        <input type="text" class="input-search" id="searchMsg" placeholder="Search message…" />
+        <select class="select-filter" id="filterStatus">
+          <option value="">All Status</option>
+          <option value="SUCCESS">SUCCESS</option>
+          <option value="ERROR">ERROR</option>
+          <option value="WARNING">WARNING</option>
+          <option value="INFO">INFO</option>
+        </select>
+        <select class="select-filter" id="filterService">
+          <option value="">All Services</option>
+          <option value="api-gateway">API Gateway</option>
+          <option value="order-service">Order</option>
+          <option value="payment-service">Payment</option>
+          <option value="inventory-service">Inventory</option>
+          <option value="notification-service">Notification</option>
+          <option value="logging-service">Logging</option>
+          <option value="coordinator">Coordinator</option>
+        </select>
+        <select class="select-filter" id="filterLimit">
+          <option value="50">50 rows</option>
+          <option value="100">100 rows</option>
+          <option value="200">200 rows</option>
+        </select>
+        <button class="btn btn-primary" onclick="loadLogs()">Search</button>
+        <button class="btn btn-secondary" onclick="clearFilters()">Clear</button>
+        <label style="display:flex;align-items:center;gap:6px;font-size:12px;color:var(--text-muted);margin-left:auto;cursor:pointer">
+          <input type="checkbox" id="liveMode" checked /> Live Mode
+        </label>
+      </div>
+    </div>
+  </div>
+
+  <!-- Log table -->
+  <div class="card">
+    <div class="card-header">
+      <span class="card-title">Log Entries</span>
+      <span class="card-subtitle" id="logCount">—</span>
+    </div>
+    <div style="overflow-x:auto">
+      <table class="data-table" id="logTable">
+        <thead>
+          <tr>
+            <th>Time (UTC)</th>
+            <th>Status</th>
+            <th>Service</th>
+            <th>Trace ID</th>
+            <th>Message</th>
+            <th>RT (ms)</th>
+          </tr>
+        </thead>
+        <tbody id="logBody">
+          <tr><td colspan="6" style="text-align:center;padding:24px;color:var(--text-dim)">Loading…</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</div>
+{% endblock %}
+{% block scripts %}
+<script>
+async function loadLogs() {
+  const url = window.SDLS.getUrl("logging-service");
+  if (!url) return;
+  const status  = document.getElementById("filterStatus").value;
+  const service = document.getElementById("filterService").value;
+  const limit   = document.getElementById("filterLimit").value;
+  const search  = document.getElementById("searchMsg").value;
+  let qs = `?limit=${limit}`;
+  if (status)  qs += `&status=${status}`;
+  if (service) qs += `&service=${service}`;
+  if (search)  qs += `&message=${encodeURIComponent(search)}`;
+  try {
+    const r = await fetch(`${url}/api/logs${qs}`);
+    if (!r.ok) return;
+    const d = await r.json();
+    renderLogs(d.data || d.logs || []);
+  } catch(e) {}
+}
+
+function renderLogs(logs) {
+  const tbody = document.getElementById("logBody");
+  document.getElementById("logCount").textContent = logs.length + " entries";
+  if (!logs.length) {
+    tbody.innerHTML = '<tr><td colspan="6" style="text-align:center;padding:24px;color:var(--text-dim)">No logs found</td></tr>';
+    return;
+  }
+  tbody.innerHTML = logs.map(l => `<tr>
+    <td class="mono">${window.SDLS.fmtTs(l.timestamp)}</td>
+    <td>${window.SDLS.badge(l.status)}</td>
+    <td style="color:var(--accent)">${l.service_name||"—"}</td>
+    <td class="mono" style="font-size:10px;color:var(--text-dim)">${(l.trace_id||"").slice(0,12)}…</td>
+    <td style="max-width:320px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${l.message||""}">${l.message||""}</td>
+    <td class="mono">${l.response_time_ms != null ? l.response_time_ms : "—"}</td>
+  </tr>`).join("");
+}
+
+function clearFilters() {
+  document.getElementById("filterStatus").value = "";
+  document.getElementById("filterService").value = "";
+  document.getElementById("searchMsg").value = "";
+  loadLogs();
+}
+
+// Live mode: prepend incoming logs
+window.SDLS.onNewLog = function(entry) {
+  if (!document.getElementById("liveMode")?.checked) return;
+  const tbody = document.getElementById("logBody");
+  if (tbody.querySelector("td[colspan]")) tbody.innerHTML = "";
+  const row = document.createElement("tr");
+  row.innerHTML = `
+    <td class="mono">${window.SDLS.fmtTs(entry.timestamp)}</td>
+    <td>${window.SDLS.badge(entry.status)}</td>
+    <td style="color:var(--accent)">${entry.service_name||"—"}</td>
+    <td class="mono" style="font-size:10px;color:var(--text-dim)">${(entry.trace_id||"").slice(0,12)}…</td>
+    <td style="max-width:320px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${entry.message||""}</td>
+    <td class="mono">${entry.response_time_ms != null ? entry.response_time_ms : "—"}</td>`;
+  tbody.insertBefore(row, tbody.firstChild);
+  while (tbody.children.length > 200) tbody.removeChild(tbody.lastChild);
+  const cnt = document.getElementById("logCount");
+  if (cnt) cnt.textContent = tbody.children.length + " entries (live)";
+};
+
+setTimeout(loadLogs, 2500);
+</script>
+{% endblock %}

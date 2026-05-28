@@ -1,0 +1,21 @@
+[Unit]
+Description=SDLS v3 — System 1 (API Gateway, Order Service)
+After=network-online.target docker.service
+Wants=network-online.target
+Requires=docker.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+WorkingDirectory=/opt/sdls
+EnvironmentFile=-/opt/sdls/.env
+ExecStart=/opt/sdls/scripts/deploy.sh
+ExecStop=/usr/bin/docker compose -f /opt/sdls/system1-compose.yml down
+StandardOutput=journal
+StandardError=journal
+TimeoutStartSec=300
+Restart=on-failure
+RestartSec=15
+
+[Install]
+WantedBy=multi-user.target

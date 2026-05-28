@@ -1,0 +1,180 @@
+# ═══════════════════════════════════════════════════════════════════════════════
+# SYSTEM 3 COMPOSE — Infrastructure + Core Services
+# Deploy on the EC2 instance designated as System 3 (infra node).
+# Requires: REDIS_HOST and MONGO_HOST env vars OR auto-detected via EC2 metadata.
+# ═══════════════════════════════════════════════════════════════════════════════
+
+version: "3.9"
+
+x-sys3-env: &sys3-env
+  COORDINATOR_URL: http://172.31.75.219:5007
+  REDIS_HOST: sdls-redis          # local — redis runs on this node
+  REDIS_PORT: "6379"
+  MONGO_URI: mongodb://mongodb:27017
+
+x-defaults: &defaults
+  restart: unless-stopped
+  logging:
+    driver: "json-file"
+    options: { max-size: "10m", max-file: "3" }
+
+services:
+  mongodb:
+    image: mongo:7.0
+    container_name: sdls-mongodb
+    networks:
+      - sdls-network
+    hostname: mongodb
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongo-data:/data/db
+      - ./backend/database/mongo-init.js:/docker-entrypoint-initdb.d/mongo-init.js:ro
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+      interval: 10s
+      retries: 5
+    <<: *defaults
+
+  redis:
+    image: redis:7.2-alpine
+    container_name: sdls-redis
+    networks:
+      - sdls-network
+    hostname: redis
+    ports:
+      - "6379:6379"
+    command: redis-server --save 60 1 --maxmemory 512mb --maxmemory-policy allkeys-lru
+    volumes: [redis-data:/data]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      retries: 5
+    <<: *defaults
+
+  time-sync:
+    build:
+      context: .
+      dockerfile: backend/time-sync-service/Dockerfile
+    container_name: sdls-time-sync
+    networks:
+      - sdls-network
+    hostname: time-sync
+    ports:
+      - "5008:5008"
+    environment:
+      <<: *sys3-env
+      SERVICE_NAME: time-sync
+    depends_on:
+      redis: {condition: service_healthy}
+    <<: *defaults
+
+  logging-service:
+    build:
+      context: .
+      dockerfile: backend/logging-service/Dockerfile
+    container_name: sdls-logging
+    networks:
+      - sdls-network
+    hostname: logging-service
+    ports:
+      - "5005:5005"
+    environment:
+      <<: *sys3-env
+      SERVICE_NAME: logging-service
+    depends_on:
+      mongodb: {condition: service_healthy}
+      redis:   {condition: service_healthy}
+    <<: *defaults
+
+  redis-worker:
+    build:
+      context: .
+      dockerfile: backend/logging-service/Dockerfile
+    container_name: sdls-redis-worker
+    networks:
+      - sdls-network
+    hostname: redis-worker
+    command: python redis_worker.py
+    environment:
+      <<: *sys3-env
+    restart: always
+    depends_on:
+      mongodb: {condition: service_healthy}
+      redis:   {condition: service_healthy}
+    <<: *defaults
+
+  backup-logging:
+    build:
+      context: .
+      dockerfile: backend/backup-logging-service/Dockerfile
+    container_name: sdls-backup-logging
+    networks:
+      - sdls-network
+    hostname: backup-logging
+    ports:
+      - "5010:5010"
+    environment:
+      <<: *sys3-env
+      SERVICE_NAME: backup-logging
+    depends_on: [redis]
+    <<: *defaults
+
+  coordinator:
+    build:
+      context: .
+      dockerfile: backend/coordinator-service/Dockerfile
+    container_name: sdls-coordinator
+    networks:
+      - sdls-network
+    hostname: coordinator
+    ports:
+      - "5007:5007"
+    environment:
+      <<: *sys3-env
+      SERVICE_NAME: coordinator
+    depends_on: [redis, logging-service]
+    <<: *defaults
+
+  notification-service:
+    build:
+      context: .
+      dockerfile: backend/notification-service/Dockerfile
+    container_name: sdls-notification
+    networks:
+      - sdls-network
+    hostname: notification-service
+    ports:
+      - "5004:5004"
+    environment:
+      <<: *sys3-env
+      SERVICE_NAME: notification-service
+    depends_on: [logging-service, redis]
+    <<: *defaults
+
+  dashboard:
+    build:
+      context: .
+      dockerfile: frontend/dashboard/Dockerfile
+    container_name: sdls-dashboard
+    networks:
+      - sdls-network
+    hostname: dashboard
+    ports:
+      - "5006:5006"
+    environment:
+      <<: *sys3-env
+      SERVICE_NAME: dashboard
+      DASHBOARD_USERNAME: ${DASHBOARD_USERNAME:-admin}
+      DASHBOARD_PASSWORD: ${DASHBOARD_PASSWORD:-admin123}
+      SECRET_KEY: ${SECRET_KEY:-sdls-v3-change-in-production}
+    depends_on: [logging-service, coordinator]
+    <<: *defaults
+
+volumes:
+  mongo-data:
+  redis-data:
+
+networks:
+  sdls-network:
+    driver: bridge

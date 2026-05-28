@@ -1,0 +1,33 @@
+{
+  "_comment": "SDLS v3 Centralized Config — loaded into Redis on startup by coordinator",
+  "system": {
+    "name": "SDLS",
+    "version": "3.0.0",
+    "environment": "production"
+  },
+  "log_retention_days": {
+    "INFO":    7,
+    "SUCCESS": 7,
+    "WARNING": 30,
+    "ERROR":   90
+  },
+  "thresholds": {
+    "queue_high_water": 5000,
+    "queue_low_water":  1000,
+    "health_check_interval_s": 10,
+    "registry_ttl_s": 90,
+    "heartbeat_interval_s": 30,
+    "failover_fail_count": 3
+  },
+  "service_priority": {
+    "payment-service":      1,
+    "notification-service": 2,
+    "order-service":        3,
+    "inventory-service":    4,
+    "analytics":            5
+  },
+  "failover_map": {
+    "payment-service": "backup-payment",
+    "logging-service": "backup-logging"
+  }
+}

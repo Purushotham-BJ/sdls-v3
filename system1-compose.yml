@@ -1,0 +1,40 @@
+# ═══════════════════════════════════════════════════════════════════════════════
+# SYSTEM 1 COMPOSE — API Gateway + Order Service
+# Requires REDIS_HOST env var pointing to System 3's EC2 private IP.
+# ═══════════════════════════════════════════════════════════════════════════════
+
+version: "3.9"
+
+x-sys1-env: &sys1-env
+  REDIS_HOST: ${REDIS_HOST:?Set REDIS_HOST to System 3 private IP}
+  REDIS_PORT: "6379"
+  MONGO_URI: mongodb://${MONGO_HOST:-${REDIS_HOST}}:27017
+
+x-defaults: &defaults
+  restart: unless-stopped
+  network_mode: host
+  logging:
+    driver: "json-file"
+    options: { max-size: "10m", max-file: "3" }
+
+services:
+  order-service:
+    build:
+      context: .
+      dockerfile: backend/order-service/Dockerfile
+    container_name: sdls-order
+    environment:
+      <<: *sys1-env
+      SERVICE_NAME: order-service
+    <<: *defaults
+
+  api-gateway:
+    build:
+      context: .
+      dockerfile: backend/api-gateway/Dockerfile
+    container_name: sdls-gateway
+    environment:
+      <<: *sys1-env
+      SERVICE_NAME: api-gateway
+    depends_on: [order-service]
+    <<: *defaults

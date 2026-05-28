@@ -1,0 +1,251 @@
+{% extends "base.html" %}
+{% block title %}Topology · SDLS{% endblock %}
+{% block breadcrumb %}Live Topology{% endblock %}
+{% block content %}
+<div class="page-body">
+  <div class="page-header">
+    <div>
+      <div class="page-title">Live Distributed Topology</div>
+      <div class="page-sub">Dynamic service graph from Redis node registry — no hardcoded IPs</div>
+    </div>
+    <div class="header-actions">
+      <button class="btn btn-secondary" onclick="refreshTopology()">↺ Refresh</button>
+    </div>
+  </div>
+
+  <div class="topo-wrap">
+    <div class="topo-toolbar">
+      <span style="font-size:12px;color:var(--text-muted)">Nodes from live registry · edges from service dependency graph</span>
+      <span style="margin-left:auto;font-size:11px;color:var(--text-dim)" id="topoTs">—</span>
+    </div>
+    <canvas id="topoCanvas"></canvas>
+    <div class="topo-legend">
+      <div class="legend-item"><div class="legend-dot" style="background:var(--sys1)"></div>System 1</div>
+      <div class="legend-item"><div class="legend-dot" style="background:var(--sys2)"></div>System 2</div>
+      <div class="legend-item"><div class="legend-dot" style="background:var(--sys3)"></div>System 3</div>
+      <div class="legend-item"><div class="legend-dot" style="background:var(--success)"></div>Healthy</div>
+      <div class="legend-item"><div class="legend-dot" style="background:var(--danger)"></div>Unreachable</div>
+    </div>
+  </div>
+
+  <div class="two-col">
+    <div class="card">
+      <div class="card-header"><span class="card-title">🔗 Service Latency</span></div>
+      <div class="card-body">
+        <table class="data-table" id="latencyTable">
+          <thead><tr><th>Service</th><th>Host</th><th>Status</th><th>Latency</th></tr></thead>
+          <tbody id="latencyBody"><tr><td colspan="4" style="text-align:center;color:var(--text-dim)">Loading…</td></tr></tbody>
+        </table>
+      </div>
+    </div>
+    <div class="card">
+      <div class="card-header"><span class="card-title">🔌 Circuit Breakers</span></div>
+      <div class="card-body">
+        <div id="cbStatus"><div class="empty-state loading-pulse">Loading…</div></div>
+      </div>
+    </div>
+  </div>
+</div>
+{% endblock %}
+{% block scripts %}
+<script>
+const EDGES = [
+  ["api-gateway","order-service"],
+  ["order-service","payment-service"],
+  ["order-service","inventory-service"],
+  ["order-service","notification-service"],
+  ["api-gateway","logging-service"],
+  ["order-service","logging-service"],
+  ["payment-service","logging-service"],
+  ["inventory-service","logging-service"],
+  ["notification-service","logging-service"],
+  ["coordinator","api-gateway"],
+  ["coordinator","order-service"],
+  ["coordinator","payment-service"],
+  ["coordinator","inventory-service"],
+  ["coordinator","notification-service"],
+  ["coordinator","logging-service"],
+  ["backup-payment","logging-service"],
+  ["backup-logging","coordinator"],
+];
+
+const LAYOUT = {
+  "api-gateway":          {x:.50, y:.08},
+  "order-service":        {x:.50, y:.25},
+  "payment-service":      {x:.20, y:.48},
+  "inventory-service":    {x:.45, y:.48},
+  "backup-payment":       {x:.10, y:.68},
+  "notification-service": {x:.70, y:.48},
+  "logging-service":      {x:.20, y:.72},
+  "backup-logging":       {x:.05, y:.88},
+  "coordinator":          {x:.50, y:.72},
+  "time-sync":            {x:.75, y:.72},
+  "dashboard":            {x:.88, y:.52},
+};
+
+const ROLE_COLORS = {system1:"#3b82f6",system2:"#8b5cf6",system3:"#10b981",infra:"#f59e0b",unknown:"#6b7fa3"};
+let nodes = [];
+
+const canvas = document.getElementById("topoCanvas");
+const ctx = canvas.getContext("2d");
+
+function resizeCanvas() {
+  const w = canvas.parentElement.clientWidth;
+  canvas.width = w;
+  canvas.height = Math.min(w * 0.62, 500);
+  drawAll();
+}
+
+function buildNodes(registry, health) {
+  const result = [];
+  const allKeys = new Set([...Object.keys(LAYOUT), ...Object.keys(registry)]);
+  for (const id of allKeys) {
+    const reg = registry[id] || {};
+    const h   = health[id]   || {};
+    const lyt = LAYOUT[id]   || {x: .5, y: .5};
+    result.push({
+      id,
+      x: lyt.x * canvas.width,
+      y: lyt.y * canvas.height,
+      host: reg.host || "—",
+      port: reg.port || h.port,
+      role: reg.role || "unknown",
+      status: h.status || (reg.host ? "registered" : "unknown"),
+      rt: h.response_time,
+    });
+  }
+  return result;
+}
+
+function drawAll() {
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+  const byId = {};
+  nodes.forEach(n => byId[n.id] = n);
+
+  // Draw edges
+  for (const [src, dst] of EDGES) {
+    const a = byId[src], b = byId[dst];
+    if (!a || !b) continue;
+    const healthy = a.status === "healthy" && b.status === "healthy";
+    ctx.beginPath();
+    ctx.moveTo(a.x, a.y);
+    ctx.lineTo(b.x, b.y);
+    ctx.strokeStyle = healthy ? "rgba(59,130,246,.25)" : "rgba(239,68,68,.2)";
+    ctx.lineWidth = 1.5;
+    ctx.setLineDash(healthy ? [] : [4, 4]);
+    ctx.stroke();
+    ctx.setLineDash([]);
+  }
+
+  // Draw nodes
+  for (const n of nodes) {
+    const color = ROLE_COLORS[n.role] || ROLE_COLORS.unknown;
+    const healthy = n.status === "healthy";
+    const radius = 22;
+
+    // Glow for healthy
+    if (healthy) {
+      ctx.beginPath();
+      ctx.arc(n.x, n.y, radius + 6, 0, Math.PI * 2);
+      ctx.fillStyle = color + "20";
+      ctx.fill();
+    }
+
+    // Node circle
+    ctx.beginPath();
+    ctx.arc(n.x, n.y, radius, 0, Math.PI * 2);
+    ctx.fillStyle = getComputedStyle(document.documentElement).getPropertyValue("--bg-card").trim() || "#0f1623";
+    ctx.fill();
+    ctx.strokeStyle = healthy ? color : "#ef444488";
+    ctx.lineWidth = healthy ? 2 : 1.5;
+    ctx.stroke();
+
+    // Status dot
+    ctx.beginPath();
+    ctx.arc(n.x + radius - 5, n.y - radius + 5, 4, 0, Math.PI * 2);
+    ctx.fillStyle = healthy ? "#10b981" : (n.status === "unreachable" ? "#ef4444" : "#6b7fa3");
+    ctx.fill();
+
+    // Label
+    ctx.fillStyle = getComputedStyle(document.documentElement).getPropertyValue("--text").trim() || "#e2e8f4";
+    ctx.font = "bold 9px Inter, sans-serif";
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    const short = n.id.replace("-service","").replace("backup-","bk-").slice(0,9);
+    ctx.fillText(short, n.x, n.y);
+
+    // Port below
+    if (n.port) {
+      ctx.fillStyle = getComputedStyle(document.documentElement).getPropertyValue("--text-muted").trim() || "#6b7fa3";
+      ctx.font = "8px monospace";
+      ctx.fillText(":"+n.port, n.x, n.y + 36);
+    }
+  }
+}
+
+async function refreshTopology() {
+  const coordUrl = window.SDLS.getUrl("coordinator");
+  if (!coordUrl) return;
+  try {
+    const [topR, regR] = await Promise.all([
+      fetch(`${coordUrl}/api/cluster/topology`),
+      fetch(`${coordUrl}/api/cluster/registry`),
+    ]);
+    const top = topR.ok ? await topR.json() : {data:{nodes:[]}};
+    const reg = regR.ok ? await regR.json() : {data:{}};
+
+    const health = {};
+    (top.data?.nodes || []).forEach(n => health[n.id] = n);
+    nodes = buildNodes(reg.data || {}, health);
+    drawAll();
+
+    // Latency table
+    const tbody = document.getElementById("latencyBody");
+    if (tbody) {
+      tbody.innerHTML = nodes.map(n => `<tr>
+        <td>${n.id}</td>
+        <td class="mono">${n.host}${n.port ? ":"+n.port : ""}</td>
+        <td>${window.SDLS.badge(n.status?.toUpperCase() === "HEALTHY" ? "SUCCESS" : n.status?.toUpperCase() || "INFO")}</td>
+        <td class="mono">${n.rt ? Math.round(n.rt)+"ms" : "—"}</td>
+      </tr>`).join("");
+    }
+
+    // Circuit breakers (dummy for now from coordinator state)
+    const cbEl = document.getElementById("cbStatus");
+    if (cbEl) {
+      const healthy = nodes.filter(n=>n.status==="healthy");
+      const unreach  = nodes.filter(n=>n.status==="unreachable");
+      cbEl.innerHTML = `
+        <div style="display:flex;flex-direction:column;gap:6px;font-size:12px">
+          <div style="display:flex;justify-content:space-between">
+            <span>Healthy Services</span><span style="color:var(--success);font-weight:700">${healthy.length}</span>
+          </div>
+          <div style="display:flex;justify-content:space-between">
+            <span>Unreachable</span><span style="color:${unreach.length>0?"var(--danger)":"var(--text-muted)"};font-weight:700">${unreach.length}</span>
+          </div>
+          <div style="display:flex;justify-content:space-between">
+            <span>Total Registered</span><span style="font-weight:700">${nodes.length}</span>
+          </div>
+        </div>`;
+    }
+
+    const ts = top.data?.updated_at;
+    if (ts) document.getElementById("topoTs").textContent = "Updated " + window.SDLS.fmtTs(ts);
+  } catch (e) {}
+}
+
+window.addEventListener("resize", resizeCanvas);
+resizeCanvas();
+
+// Initial draw with placeholders
+nodes = Object.keys(LAYOUT).map(id => ({
+  id, role: "unknown", status: "unknown",
+  x: LAYOUT[id].x * canvas.width,
+  y: LAYOUT[id].y * canvas.height,
+}));
+drawAll();
+
+setTimeout(() => { refreshTopology(); setInterval(refreshTopology, 12000); }, 2500);
+</script>
+{% endblock %}

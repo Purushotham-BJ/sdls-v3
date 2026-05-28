@@ -1,0 +1,49 @@
+# ═══════════════════════════════════════════════════════════════════════════════
+# SYSTEM 2 COMPOSE — Payment + Inventory services
+# Requires REDIS_HOST env var pointing to System 3's EC2 private IP.
+# ═══════════════════════════════════════════════════════════════════════════════
+
+version: "3.9"
+
+x-sys2-env: &sys2-env
+  REDIS_HOST: ${REDIS_HOST:?Set REDIS_HOST to System 3 private IP}
+  REDIS_PORT: "6379"
+  MONGO_URI: mongodb://${MONGO_HOST:-${REDIS_HOST}}:27017
+
+x-defaults: &defaults
+  restart: unless-stopped
+  network_mode: host
+  logging:
+    driver: "json-file"
+    options: { max-size: "10m", max-file: "3" }
+
+services:
+  payment-service:
+    build:
+      context: .
+      dockerfile: backend/payment-service/Dockerfile
+    container_name: sdls-payment
+    environment:
+      <<: *sys2-env
+      SERVICE_NAME: payment-service
+    <<: *defaults
+
+  backup-payment:
+    build:
+      context: .
+      dockerfile: backend/backup-payment-service/Dockerfile
+    container_name: sdls-backup-payment
+    environment:
+      <<: *sys2-env
+      SERVICE_NAME: backup-payment
+    <<: *defaults
+
+  inventory-service:
+    build:
+      context: .
+      dockerfile: backend/inventory-service/Dockerfile
+    container_name: sdls-inventory
+    environment:
+      <<: *sys2-env
+      SERVICE_NAME: inventory-service
+    <<: *defaults

@@ -1,0 +1,161 @@
+{% extends "base.html" %}
+{% block title %}Errors · SDLS{% endblock %}
+{% block breadcrumb %}Errors &amp; Alerts{% endblock %}
+{% block content %}
+<div class="page-body">
+  <div class="page-header">
+    <div>
+      <div class="page-title">Errors &amp; Alerts</div>
+      <div class="page-sub">Live error stream, warnings, and system alerts</div>
+    </div>
+    <div class="header-actions">
+      <button class="btn btn-secondary" onclick="loadErrors()">↺ Refresh</button>
+      <button class="btn btn-danger btn-sm" onclick="clearErrorBadge()">Clear Badge</button>
+    </div>
+  </div>
+
+  <!-- Alert counters -->
+  <div class="stats-grid">
+    <div class="stat-card error">
+      <div class="stat-icon">🔴</div>
+      <div class="stat-val" id="errTotal">—</div>
+      <div class="stat-label">Total Errors</div>
+    </div>
+    <div class="stat-card warn">
+      <div class="stat-icon">🟡</div>
+      <div class="stat-val" id="warnTotal">—</div>
+      <div class="stat-label">Warnings</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-icon">⏱</div>
+      <div class="stat-val" id="lastErrorTs">—</div>
+      <div class="stat-label">Last Error</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-icon">🔁</div>
+      <div class="stat-val" id="failoverTotal">—</div>
+      <div class="stat-label">Failover Events</div>
+    </div>
+  </div>
+
+  <div class="two-col">
+    <!-- Recent errors -->
+    <div class="card" style="grid-column: 1 / -1">
+      <div class="card-header">
+        <span class="card-title">🚨 Live Error &amp; Warning Stream</span>
+        <span class="card-subtitle" id="errorStreamCount">0 events</span>
+      </div>
+      <table class="data-table">
+        <thead>
+          <tr><th>Time</th><th>Level</th><th>Service</th><th>Trace ID</th><th>Message</th></tr>
+        </thead>
+        <tbody id="errBody">
+          <tr><td colspan="5" style="text-align:center;color:var(--text-dim);padding:24px">Waiting for errors…</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- Failover events -->
+  <div class="card">
+    <div class="card-header"><span class="card-title">⚡ Failover &amp; Recovery Timeline</span></div>
+    <div class="card-body">
+      <div id="failoverTimeline" class="failover-list">
+        <div class="empty-state">Loading…</div>
+      </div>
+    </div>
+  </div>
+</div>
+{% endblock %}
+{% block scripts %}
+<script>
+const MAX_ERR_ROWS = 100;
+let errEvents = [];
+
+window.SDLS.onNewLog = function(entry) {
+  if (entry.status !== "ERROR" && entry.status !== "WARNING") return;
+  errEvents.unshift(entry);
+  if (errEvents.length > MAX_ERR_ROWS) errEvents.pop();
+  renderErrTable();
+  document.getElementById("lastErrorTs").textContent = window.SDLS.fmtTs(entry.timestamp);
+};
+
+function renderErrTable() {
+  const tbody = document.getElementById("errBody");
+  if (!errEvents.length) {
+    tbody.innerHTML = '<tr><td colspan="5" style="text-align:center;color:var(--text-dim);padding:24px">No errors — system healthy ✓</td></tr>';
+  } else {
+    tbody.innerHTML = errEvents.map(e => `<tr>
+      <td class="mono">${window.SDLS.fmtTs(e.timestamp)}</td>
+      <td>${window.SDLS.badge(e.status)}</td>
+      <td style="color:var(--accent)">${e.service_name || "—"}</td>
+      <td class="mono" style="font-size:10px;color:var(--text-dim)">${(e.trace_id||"").slice(0,12)}…</td>
+      <td style="max-width:340px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--danger)" title="${e.message||""}">${e.message || ""}</td>
+    </tr>`).join("");
+    document.getElementById("errorStreamCount").textContent = errEvents.length + " events";
+  }
+}
+
+async function loadErrors() {
+  const logUrl   = window.SDLS.getUrl("logging-service");
+  const coordUrl = window.SDLS.getUrl("coordinator");
+  if (!logUrl || !coordUrl) return;
+
+  // Error count
+  try {
+    const r = await fetch(`${logUrl}/api/logs?status=ERROR&limit=100`);
+    if (r.ok) {
+      const d = await r.json();
+      const logs = d.data || d.logs || [];
+      document.getElementById("errTotal").textContent = logs.length + (logs.length === 100 ? "+" : "");
+      // Populate table if socket not providing data yet
+      if (!errEvents.length && logs.length) {
+        logs.forEach(l => { if (!errEvents.find(e => e.trace_id === l.trace_id)) errEvents.push(l); });
+        renderErrTable();
+      }
+    }
+  } catch(e) {}
+
+  // Warning count
+  try {
+    const r = await fetch(`${logUrl}/api/logs?status=WARNING&limit=100`);
+    if (r.ok) {
+      const d = await r.json();
+      document.getElementById("warnTotal").textContent = (d.data||d.logs||[]).length;
+    }
+  } catch(e) {}
+
+  // Failover events
+  try {
+    const r = await fetch(`${coordUrl}/api/cluster/failovers`);
+    if (r.ok) {
+      const d = await r.json();
+      const events = d.data || [];
+      document.getElementById("failoverTotal").textContent = events.length;
+      const tl = document.getElementById("failoverTimeline");
+      if (!events.length) {
+        tl.innerHTML = '<div class="empty-state">No failover events recorded</div>';
+      } else {
+        tl.innerHTML = events.slice().reverse().map(e => `
+          <div class="failover-item ${e.event}">
+            <span class="failover-ts">${window.SDLS.fmtTs(e.timestamp)}</span>
+            <div>
+              <div class="failover-svc">${e.service}</div>
+              <div class="failover-detail">${e.event === "failover"
+                ? "Switched to: " + (e.switched_to || "backup")
+                : "Restored to primary: " + (e.restored_to || "")}</div>
+            </div>
+          </div>`).join("");
+      }
+    }
+  } catch(e) {}
+}
+
+function clearErrorBadge() {
+  const badge = document.getElementById("errorBadge");
+  if (badge) { badge.textContent = ""; badge.style.display = "none"; }
+}
+
+setTimeout(() => { loadErrors(); setInterval(loadErrors, 15000); }, 2500);
+</script>
+{% endblock %}
