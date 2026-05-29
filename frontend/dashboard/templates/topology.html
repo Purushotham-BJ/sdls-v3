@@ -246,6 +246,7 @@ nodes = Object.keys(LAYOUT).map(id => ({
 }));
 drawAll();
 
-setTimeout(() => { refreshTopology(); setInterval(refreshTopology, 12000); }, 2500);
+refreshTopology();
+setInterval(refreshTopology, 3000);
 </script>
 {% endblock %}

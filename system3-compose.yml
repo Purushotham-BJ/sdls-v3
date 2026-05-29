@@ -7,6 +7,7 @@
 version: "3.9"
 
 x-sys3-env: &sys3-env
+  SERVICE_HOST: 172.31.75.219
   COORDINATOR_URL: http://172.31.75.219:5007
   REDIS_HOST: sdls-redis          # local — redis runs on this node
   REDIS_PORT: "6379"

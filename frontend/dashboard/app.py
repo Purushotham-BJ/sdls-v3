@@ -136,22 +136,33 @@ def registry_api():
 @app.route("/api/service-map")
 @_require_login
 def service_map():
-    """
-    Returns dynamic service URL map for the frontend.
-    Frontend uses this to make API calls without hardcoded IPs.
-    """
     if HAS_REGISTRY:
         registry = get_all_services()
         svc_map = {}
+
+        PUBLIC_IP = "98.93.32.45"
+
         for name in PORTS:
             info = registry.get(name)
+
             if info:
-                svc_map[name] = f"http://{info['host']}:{info['port']}"
+                if name in [
+                    "logging-service",
+                    "coordinator",
+                    "dashboard",
+                    "notification-service",
+                    "time-sync",
+                    "backup-logging"
+                ]:
+                    svc_map[name] = f"http://{PUBLIC_IP}:{info['port']}"
+                else:
+                    svc_map[name] = f"http://{info['host']}:{info['port']}"
             else:
                 svc_map[name] = get_service_url(name)
-        return jsonify({"success": True, "services": svc_map})
-    return jsonify({"success": False, "services": {}})
 
+        return jsonify({"success": True, "services": svc_map})
+
+    return jsonify({"success": False, "services": {}})
 
 @app.route("/health")
 def health():

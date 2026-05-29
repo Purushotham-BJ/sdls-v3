@@ -226,9 +226,9 @@ async function pollAnalytics() {
     if (!r.ok) return;
     const d = await r.json();
     const data = d.data || {};
-    const total = (data.total || 0);
-    const succ  = (data.by_status?.SUCCESS || 0) + (data.by_status?.success || 0);
-    const err   = (data.by_status?.ERROR   || 0) + (data.by_status?.error   || 0);
+    const total = data.total_requests || 0;
+    const succ  = data.success_count || 0;
+    const err   = data.total_errors || 0;
     document.getElementById("totalReqs").textContent  = total.toLocaleString();
     document.getElementById("successCount").textContent = succ.toLocaleString();
     document.getElementById("errorCount").textContent  = err.toLocaleString();
